@@ -88,6 +88,7 @@ pub struct Slider<'a> {
     custom_parser: Option<NumParser<'a>>,
     trailing_fill: Option<bool>,
     handle_shape: Option<HandleShape>,
+    update_while_editing: bool,
 }
 
 impl<'a> Slider<'a> {
@@ -135,6 +136,7 @@ impl<'a> Slider<'a> {
             custom_parser: None,
             trailing_fill: None,
             handle_shape: None,
+            update_while_editing: true,
         }
     }
 
@@ -311,6 +313,16 @@ impl<'a> Slider<'a> {
     #[inline]
     pub fn handle_shape(mut self, handle_shape: HandleShape) -> Self {
         self.handle_shape = Some(handle_shape);
+        self
+    }
+
+    /// Update the value on each key press when text-editing the value.
+    ///
+    /// Default: `true`.
+    /// If `false`, the value will only be updated when user presses enter or deselects the value.
+    #[inline]
+    pub fn update_while_editing(mut self, update: bool) -> Self {
+        self.update_while_editing = update;
         self
     }
 
@@ -832,7 +844,8 @@ impl<'a> Slider<'a> {
                 .min_decimals(self.min_decimals)
                 .max_decimals_opt(self.max_decimals)
                 .suffix(self.suffix.clone())
-                .prefix(self.prefix.clone());
+                .prefix(self.prefix.clone())
+                .update_while_editing(self.update_while_editing);
             if let Some(fmt) = &self.custom_formatter {
                 dv = dv.custom_formatter(fmt);
             };
