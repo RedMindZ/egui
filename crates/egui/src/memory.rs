@@ -224,7 +224,7 @@ impl Default for Options {
         Self {
             style: Default::default(),
             zoom_factor: 1.0,
-            zoom_with_keyboard: true,
+            zoom_with_keyboard: false,
             tessellation_options: Default::default(),
             repaint_on_widget_change: false,
             screen_reader: false,
