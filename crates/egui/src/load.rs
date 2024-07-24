@@ -55,23 +55,21 @@
 mod bytes_loader;
 mod texture_loader;
 
-use std::borrow::Cow;
-use std::fmt::Debug;
-use std::ops::Deref;
-use std::{fmt::Display, sync::Arc};
+use std::{
+    borrow::Cow,
+    fmt::{Debug, Display},
+    ops::Deref,
+    sync::Arc,
+};
 
 use ahash::HashMap;
 
-use epaint::mutex::Mutex;
-use epaint::util::FloatOrd;
-use epaint::util::OrderedFloat;
-use epaint::TextureHandle;
-use epaint::{textures::TextureOptions, ColorImage, TextureId, Vec2};
+use emath::{Float, OrderedFloat};
+use epaint::{mutex::Mutex, textures::TextureOptions, ColorImage, TextureHandle, TextureId, Vec2};
 
 use crate::Context;
 
-pub use self::bytes_loader::DefaultBytesLoader;
-pub use self::texture_loader::DefaultTextureLoader;
+pub use self::{bytes_loader::DefaultBytesLoader, texture_loader::DefaultTextureLoader};
 
 /// Represents a failed attempt at loading an image.
 #[derive(Clone, Debug)]
@@ -125,6 +123,7 @@ pub type Result<T, E = LoadError> = std::result::Result<T, E>;
 /// Given as a hint for image loading requests.
 ///
 /// Used mostly for rendering SVG:s to a good size.
+/// The size is measured in texels, with the pixels per point already factored in.
 ///
 /// All variants will preserve the original aspect ratio.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

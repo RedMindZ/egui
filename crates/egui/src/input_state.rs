@@ -2,7 +2,10 @@ mod touch_state;
 
 use crate::data::input::*;
 use crate::{emath::*, util::History};
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 
 pub use crate::Key;
 pub use touch_state::MultiTouchInfo;
@@ -11,13 +14,20 @@ use touch_state::TouchState;
 /// If the pointer moves more than this, it won't become a click (but it is still a drag)
 const MAX_CLICK_DIST: f32 = 6.0; // TODO(emilk): move to settings
 
-/// If the pointer is down for longer than this, it won't become a click (but it is still a drag)
-const MAX_CLICK_DURATION: f64 = 0.6; // TODO(emilk): move to settings
+/// If the pointer is down for longer than this it will no longer register as a click.
+///
+/// If a touch is held for this many seconds while still,
+/// then it will register as a "long-touch" which is equivalent to a secondary click.
+///
+/// This is to support "press and hold for context menu" on touch screens.
+const MAX_CLICK_DURATION: f64 = 0.8; // TODO(emilk): move to settings
 
 /// The new pointer press must come within this many seconds from previous pointer release
 const MAX_DOUBLE_CLICK_DELAY: f64 = 0.3; // TODO(emilk): move to settings
 
 /// Input state that egui updates each frame.
+///
+/// You can access this with [`crate::Context::input`].
 ///
 /// You can check if `egui` is using the inputs using
 /// [`crate::Context::wants_pointer_input`] and [`crate::Context::wants_keyboard_input`].
@@ -30,13 +40,24 @@ pub struct InputState {
     /// State of the mouse or simple touch gestures which can be mapped to mouse operations.
     pub pointer: PointerState,
 
-    /// State of touches, except those covered by PointerState (like clicks and drags).
+    /// State of touches, except those covered by `PointerState` (like clicks and drags).
     /// (We keep a separate [`TouchState`] for each encountered touch device.)
     touch_states: BTreeMap<TouchDeviceId, TouchState>,
+
+    // ----------------------------------------------
+    // Scrolling:
+    //
+    /// Time of the last scroll event.
+    last_scroll_time: f64,
 
     /// Used for smoothing the scroll delta.
     unprocessed_scroll_delta: Vec2,
 
+    /// Used for smoothing the scroll delta when zooming.
+    unprocessed_scroll_delta_for_zoom: f32,
+
+    /// You probably want to use [`Self::smooth_scroll_delta`] instead.
+    ///
     /// The raw input of how many points the user scrolled.
     ///
     /// The delta dictates how the _content_ should move.
@@ -72,6 +93,7 @@ pub struct InputState {
     /// * `zoom > 1`: pinch spread
     zoom_factor_delta: f32,
 
+    // ----------------------------------------------
     /// Position and size of the egui area.
     pub screen_rect: Rect,
 
@@ -146,10 +168,14 @@ impl Default for InputState {
             raw: Default::default(),
             pointer: Default::default(),
             touch_states: Default::default(),
+
+            last_scroll_time: f64::NEG_INFINITY,
             unprocessed_scroll_delta: Vec2::ZERO,
+            unprocessed_scroll_delta_for_zoom: 0.0,
             raw_scroll_delta: Vec2::ZERO,
             smooth_scroll_delta: Vec2::ZERO,
             zoom_factor_delta: 1.0,
+
             screen_rect: Rect::from_min_size(Default::default(), vec2(10_000.0, 10_000.0)),
             pixels_per_point: 1.0,
             max_texture_side: 2048,
@@ -172,6 +198,7 @@ impl InputState {
         mut new: RawInput,
         requested_immediate_repaint_prev_frame: bool,
         pixels_per_point: f32,
+        options: &crate::Options,
     ) -> Self {
         crate::profile_function!();
 
@@ -194,8 +221,14 @@ impl InputState {
         let pointer = self.pointer.begin_frame(time, &new);
 
         let mut keys_down = self.keys_down;
+        let mut zoom_factor_delta = 1.0; // TODO(emilk): smoothing for zoom factor
         let mut raw_scroll_delta = Vec2::ZERO;
-        let mut zoom_factor_delta = 1.0;
+
+        let mut unprocessed_scroll_delta = self.unprocessed_scroll_delta;
+        let mut unprocessed_scroll_delta_for_zoom = self.unprocessed_scroll_delta_for_zoom;
+        let mut smooth_scroll_delta = Vec2::ZERO;
+        let mut smooth_scroll_delta_for_zoom = 0.0;
+
         for event in &mut new.events {
             match event {
                 Event::Key {
@@ -211,8 +244,51 @@ impl InputState {
                         keys_down.remove(key);
                     }
                 }
-                Event::Scroll(delta) => {
-                    raw_scroll_delta += *delta;
+                Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                } => {
+                    let mut delta = match unit {
+                        MouseWheelUnit::Point => *delta,
+                        MouseWheelUnit::Line => options.line_scroll_speed * *delta,
+                        MouseWheelUnit::Page => screen_rect.height() * *delta,
+                    };
+
+                    if modifiers.shift {
+                        // Treat as horizontal scrolling.
+                        // Note: one Mac we already get horizontal scroll events when shift is down.
+                        delta = vec2(delta.x + delta.y, 0.0);
+                    }
+
+                    raw_scroll_delta += delta;
+
+                    // Mouse wheels often go very large steps.
+                    // A single notch on a logitech mouse wheel connected to a Macbook returns 14.0 raw_scroll_delta.
+                    // So we smooth it out over several frames for a nicer user experience when scrolling in egui.
+                    // BUT: if the user is using a nice smooth mac trackpad, we don't add smoothing,
+                    // because it adds latency.
+                    let is_smooth = match unit {
+                        MouseWheelUnit::Point => delta.length() < 8.0, // a bit arbitrary here
+                        MouseWheelUnit::Line | MouseWheelUnit::Page => false,
+                    };
+
+                    let is_zoom = modifiers.ctrl || modifiers.mac_cmd || modifiers.command;
+
+                    #[allow(clippy::collapsible_else_if)]
+                    if is_zoom {
+                        if is_smooth {
+                            smooth_scroll_delta_for_zoom += delta.y;
+                        } else {
+                            unprocessed_scroll_delta_for_zoom += delta.y;
+                        }
+                    } else {
+                        if is_smooth {
+                            smooth_scroll_delta += delta;
+                        } else {
+                            unprocessed_scroll_delta += delta;
+                        }
+                    }
                 }
                 Event::Zoom(factor) => {
                     zoom_factor_delta *= *factor;
@@ -221,50 +297,57 @@ impl InputState {
             }
         }
 
-        let mut unprocessed_scroll_delta = self.unprocessed_scroll_delta;
-
-        let mut smooth_scroll_delta = Vec2::ZERO;
-
         {
-            // Mouse wheels often go very large steps.
-            // A single notch on a logitech mouse wheel connected to a Macbook returns 14.0 raw_scroll_delta.
-            // So we smooth it out over several frames for a nicer user experience when scrolling in egui.
-            unprocessed_scroll_delta += raw_scroll_delta;
             let dt = stable_dt.at_most(0.1);
-            let t = crate::emath::exponential_smooth_factor(0.90, 0.1, dt); // reach _% in _ seconds. TODO: parameterize
+            let t = crate::emath::exponential_smooth_factor(0.90, 0.1, dt); // reach _% in _ seconds. TODO(emilk): parameterize
 
-            for d in 0..2 {
-                if unprocessed_scroll_delta[d].abs() < 1.0 {
-                    smooth_scroll_delta[d] = unprocessed_scroll_delta[d];
-                    unprocessed_scroll_delta[d] = 0.0;
-                } else {
-                    smooth_scroll_delta[d] = t * unprocessed_scroll_delta[d];
-                    unprocessed_scroll_delta[d] -= smooth_scroll_delta[d];
+            if unprocessed_scroll_delta != Vec2::ZERO {
+                for d in 0..2 {
+                    if unprocessed_scroll_delta[d].abs() < 1.0 {
+                        smooth_scroll_delta[d] += unprocessed_scroll_delta[d];
+                        unprocessed_scroll_delta[d] = 0.0;
+                    } else {
+                        let applied = t * unprocessed_scroll_delta[d];
+                        smooth_scroll_delta[d] += applied;
+                        unprocessed_scroll_delta[d] -= applied;
+                    }
                 }
+            }
+
+            {
+                // Smooth scroll-to-zoom:
+                if unprocessed_scroll_delta_for_zoom.abs() < 1.0 {
+                    smooth_scroll_delta_for_zoom += unprocessed_scroll_delta_for_zoom;
+                    unprocessed_scroll_delta_for_zoom = 0.0;
+                } else {
+                    let applied = t * unprocessed_scroll_delta_for_zoom;
+                    smooth_scroll_delta_for_zoom += applied;
+                    unprocessed_scroll_delta_for_zoom -= applied;
+                }
+
+                zoom_factor_delta *=
+                    (options.scroll_zoom_speed * smooth_scroll_delta_for_zoom).exp();
             }
         }
 
-        let mut modifiers = new.modifiers;
-
-        let focused_changed = self.focused != new.focused
-            || new
-                .events
-                .iter()
-                .any(|e| matches!(e, Event::WindowFocused(_)));
-        if focused_changed {
-            // It is very common for keys to become stuck when we alt-tab, or a save-dialog opens by Ctrl+S.
-            // Therefore we clear all the modifiers and down keys here to avoid that.
-            modifiers = Default::default();
-            keys_down = Default::default();
-        }
+        let is_scrolling = raw_scroll_delta != Vec2::ZERO || smooth_scroll_delta != Vec2::ZERO;
+        let last_scroll_time = if is_scrolling {
+            time
+        } else {
+            self.last_scroll_time
+        };
 
         Self {
             pointer,
             touch_states: self.touch_states,
+
+            last_scroll_time,
             unprocessed_scroll_delta,
+            unprocessed_scroll_delta_for_zoom,
             raw_scroll_delta,
             smooth_scroll_delta,
             zoom_factor_delta,
+
             screen_rect,
             pixels_per_point,
             max_texture_side: new.max_texture_side.unwrap_or(self.max_texture_side),
@@ -273,7 +356,7 @@ impl InputState {
             predicted_dt: new.predicted_dt,
             stable_dt,
             focused: new.focused,
-            modifiers,
+            modifiers: new.modifiers,
             keys_down,
             events: new.events.clone(), // TODO(emilk): remove clone() and use raw.events
             raw: new,
@@ -330,11 +413,37 @@ impl InputState {
         )
     }
 
+    /// How long has it been (in seconds) since the use last scrolled?
+    #[inline(always)]
+    pub fn time_since_last_scroll(&self) -> f32 {
+        (self.time - self.last_scroll_time) as f32
+    }
+
     /// The [`crate::Context`] will call this at the end of each frame to see if we need a repaint.
-    pub fn wants_repaint(&self) -> bool {
-        self.pointer.wants_repaint()
+    ///
+    /// Returns how long to wait for a repaint.
+    pub fn wants_repaint_after(&self) -> Option<Duration> {
+        if self.pointer.wants_repaint()
             || self.unprocessed_scroll_delta.abs().max_elem() > 0.2
+            || self.unprocessed_scroll_delta_for_zoom.abs() > 0.2
             || !self.events.is_empty()
+        {
+            // Immediate repaint
+            return Some(Duration::ZERO);
+        }
+
+        if self.any_touches() && !self.pointer.is_decidedly_dragging() {
+            // We need to wake up and check for press-and-hold for the context menu.
+            if let Some(press_start_time) = self.pointer.press_start_time {
+                let press_duration = self.time - press_start_time;
+                if press_duration < MAX_CLICK_DURATION {
+                    let secs_until_menu = MAX_CLICK_DURATION - press_duration;
+                    return Some(Duration::from_secs_f64(secs_until_menu));
+                }
+            }
+        }
+
+        None
     }
 
     /// Count presses of a key. If non-zero, the presses are consumed, so that this will only return non-zero once.
@@ -489,15 +598,16 @@ impl InputState {
     /// delivers a synthetic zoom factor based on ctrl-scroll events, as a fallback.
     pub fn multi_touch(&self) -> Option<MultiTouchInfo> {
         // In case of multiple touch devices simply pick the touch_state of the first active device
-        if let Some(touch_state) = self.touch_states.values().find(|t| t.is_active()) {
-            touch_state.info()
-        } else {
-            None
-        }
+        self.touch_states.values().find_map(|t| t.info())
     }
 
     /// True if there currently are any fingers touching egui.
     pub fn any_touches(&self) -> bool {
+        self.touch_states.values().any(|t| t.any_touches())
+    }
+
+    /// True if we have ever received a touch event.
+    pub fn has_touch_screen(&self) -> bool {
         !self.touch_states.is_empty()
     }
 
@@ -547,6 +657,14 @@ impl InputState {
             .filter(|event| filter.matches(event))
             .cloned()
             .collect()
+    }
+
+    /// A long press is something we detect on touch screens
+    /// to trigger a secondary click (context menu).
+    ///
+    /// Returns `true` only on one frame.
+    pub(crate) fn is_long_touch(&self) -> bool {
+        self.any_touches() && self.pointer.is_long_press()
     }
 }
 
@@ -636,6 +754,9 @@ pub struct PointerState {
     /// Current velocity of pointer.
     velocity: Vec2,
 
+    /// Current direction of pointer.
+    direction: Vec2,
+
     /// Recent movement of the pointer.
     /// Used for calculating velocity of pointer.
     pos_history: History<Pos2>,
@@ -655,6 +776,8 @@ pub struct PointerState {
     pub(crate) has_moved_too_much_for_a_click: bool,
 
     /// Did [`Self::is_decidedly_dragging`] go from `false` to `true` this frame?
+    ///
+    /// This could also be the trigger point for a long-touch.
     pub(crate) started_decidedly_dragging: bool,
 
     /// When did the pointer get click last?
@@ -682,7 +805,8 @@ impl Default for PointerState {
             delta: Vec2::ZERO,
             motion: None,
             velocity: Vec2::ZERO,
-            pos_history: History::new(0..1000, 0.1),
+            direction: Vec2::ZERO,
+            pos_history: History::new(2..1000, 0.1),
             down: Default::default(),
             press_origin: None,
             press_start_time: None,
@@ -755,6 +879,7 @@ impl PointerState {
                             button,
                         });
                     } else {
+                        // Released
                         let clicked = self.could_any_button_be_click();
 
                         let click = if clicked {
@@ -793,7 +918,10 @@ impl PointerState {
                 }
                 Event::PointerGone => {
                     self.latest_pos = None;
+                    // When dragging a slider and the mouse leaves the viewport, we still want the drag to work,
+                    // so we don't treat this as a `PointerEvent::Released`.
                     // NOTE: we do NOT clear `self.interact_pos` here. It will be cleared next frame.
+                    self.pos_history.clear();
                 }
                 Event::MouseMoved(delta) => *self.motion.get_or_insert(Vec2::ZERO) += *delta,
                 _ => {}
@@ -825,6 +953,8 @@ impl PointerState {
             self.last_move_time = time;
         }
 
+        self.direction = self.pos_history.velocity().unwrap_or_default().normalized();
+
         self.started_decidedly_dragging = self.is_decidedly_dragging() && !was_decidedly_dragging;
 
         self
@@ -849,9 +979,20 @@ impl PointerState {
     }
 
     /// Current velocity of pointer.
+    ///
+    /// This is smoothed over a few frames,
+    /// but can be ZERO when frame-rate is bad.
     #[inline(always)]
     pub fn velocity(&self) -> Vec2 {
         self.velocity
+    }
+
+    /// Current direction of the pointer.
+    ///
+    /// This is less sensitive to bad framerate than [`Self::velocity`].
+    #[inline(always)]
+    pub fn direction(&self) -> Vec2 {
+        self.direction
     }
 
     /// Where did the current click/drag originate?
@@ -919,6 +1060,12 @@ impl PointerState {
         (self.time - self.last_move_time) as f32
     }
 
+    /// How long has it been (in seconds) since the pointer was clicked?
+    #[inline(always)]
+    pub fn time_since_last_click(&self) -> f32 {
+        (self.time - self.last_click_time) as f32
+    }
+
     /// Was any pointer button pressed (`!down -> down`) this frame?
     ///
     /// This can sometimes return `true` even if `any_down() == false`
@@ -976,11 +1123,13 @@ impl PointerState {
         self.pointer_events.iter().any(|event| event.is_click())
     }
 
-    /// Was the button given clicked this frame?
+    /// Was the given pointer button given clicked this frame?
+    ///
+    /// Returns true on double- and triple- clicks too.
     pub fn button_clicked(&self, button: PointerButton) -> bool {
         self.pointer_events
             .iter()
-            .any(|event| matches!(event, &PointerEvent::Pressed { button: b, .. } if button == b))
+            .any(|event| matches!(event, &PointerEvent::Released { button: b, click: Some(_) } if button == b))
     }
 
     /// Was the button given double clicked this frame?
@@ -1029,21 +1178,21 @@ impl PointerState {
     ///
     /// See also [`Self::is_decidedly_dragging`].
     pub fn could_any_button_be_click(&self) -> bool {
-        if !self.any_down() {
-            return false;
-        }
-
-        if self.has_moved_too_much_for_a_click {
-            return false;
-        }
-
-        if let Some(press_start_time) = self.press_start_time {
-            if self.time - press_start_time > MAX_CLICK_DURATION {
+        if self.any_down() || self.any_released() {
+            if self.has_moved_too_much_for_a_click {
                 return false;
             }
-        }
 
-        true
+            if let Some(press_start_time) = self.press_start_time {
+                if self.time - press_start_time > MAX_CLICK_DURATION {
+                    return false;
+                }
+            }
+
+            true
+        } else {
+            false
+        }
     }
 
     /// Just because the mouse is down doesn't mean we are dragging.
@@ -1060,6 +1209,19 @@ impl PointerState {
             && !self.any_pressed()
             && !self.could_any_button_be_click()
             && !self.any_click()
+    }
+
+    /// A long press is something we detect on touch screens
+    /// to trigger a secondary click (context menu).
+    ///
+    /// Returns `true` only on one frame.
+    pub(crate) fn is_long_press(&self) -> bool {
+        self.started_decidedly_dragging
+            && !self.has_moved_too_much_for_a_click
+            && self.button_down(PointerButton::Primary)
+            && self.press_start_time.map_or(false, |press_start_time| {
+                self.time - press_start_time > MAX_CLICK_DURATION
+            })
     }
 
     /// Is the primary button currently down?
@@ -1088,7 +1250,9 @@ impl InputState {
             pointer,
             touch_states,
 
+            last_scroll_time,
             unprocessed_scroll_delta,
+            unprocessed_scroll_delta_for_zoom,
             raw_scroll_delta,
             smooth_scroll_delta,
 
@@ -1115,7 +1279,7 @@ impl InputState {
         ui.collapsing("Raw Input", |ui| raw.ui(ui));
 
         crate::containers::CollapsingHeader::new("🖱 Pointer")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
                 pointer.ui(ui);
             });
@@ -1126,9 +1290,16 @@ impl InputState {
             });
         }
 
+        ui.label(format!(
+            "Time since last scroll: {:.1} s",
+            time - last_scroll_time
+        ));
         if cfg!(debug_assertions) {
             ui.label(format!(
                 "unprocessed_scroll_delta: {unprocessed_scroll_delta:?} points"
+            ));
+            ui.label(format!(
+                "unprocessed_scroll_delta_for_zoom: {unprocessed_scroll_delta_for_zoom:?} points"
             ));
         }
         ui.label(format!("raw_scroll_delta: {raw_scroll_delta:?} points"));
@@ -1136,6 +1307,7 @@ impl InputState {
             "smooth_scroll_delta: {smooth_scroll_delta:?} points"
         ));
         ui.label(format!("zoom_factor_delta: {zoom_factor_delta:4.2}x"));
+
         ui.label(format!("screen_rect: {screen_rect:?} points"));
         ui.label(format!(
             "{pixels_per_point} physical pixels for each logical point"
@@ -1170,6 +1342,7 @@ impl PointerState {
             delta,
             motion,
             velocity,
+            direction,
             pos_history: _,
             down,
             press_origin,
@@ -1190,6 +1363,7 @@ impl PointerState {
             "velocity: [{:3.0} {:3.0}] points/sec",
             velocity.x, velocity.y
         ));
+        ui.label(format!("direction: {direction:?}"));
         ui.label(format!("down: {down:#?}"));
         ui.label(format!("press_origin: {press_origin:?}"));
         ui.label(format!("press_start_time: {press_start_time:?} s"));

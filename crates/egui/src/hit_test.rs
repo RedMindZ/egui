@@ -58,6 +58,10 @@ pub fn hit_test(
         .filter(|layer| layer.order.allow_interaction())
         .flat_map(|&layer_id| widgets.get_layer(layer_id))
         .filter(|&w| {
+            if w.interact_rect.is_negative() {
+                return false;
+            }
+
             let pos_in_layer = pos_in_layers.get(&w.layer_id).copied().unwrap_or(pos);
             let dist_sq = w.interact_rect.distance_sq_to_pos(pos_in_layer);
 
@@ -77,6 +81,16 @@ pub fn hit_test(
         // Select the top layer, and ignore widgets in any other layer:
         let top_layer = closest_hit.layer_id;
         close.retain(|w| w.layer_id == top_layer);
+
+        // If the widget is disabled, treat it as if it isn't sensing anything.
+        // This simplifies the code in `hit_test_on_close` so it doesn't have to check
+        // the `enabled` flag everywhere:
+        for w in &mut close {
+            if !w.enabled {
+                w.sense.click = false;
+                w.sense.drag = false;
+            }
+        }
 
         let pos_in_layer = pos_in_layers.get(&top_layer).copied().unwrap_or(pos);
         let hits = hit_test_on_close(&close, pos_in_layer);
@@ -301,6 +315,10 @@ fn find_closest(widgets: impl Iterator<Item = WidgetRect>, pos: Pos2) -> Option<
     let mut closest = None;
     let mut closest_dist_sq = f32::INFINITY;
     for widget in widgets {
+        if widget.interact_rect.is_negative() {
+            continue;
+        }
+
         let dist_sq = widget.interact_rect.distance_sq_to_pos(pos);
 
         // In case of a tie, take the last one = the one on top.

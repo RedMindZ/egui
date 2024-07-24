@@ -76,6 +76,7 @@ impl Mesh {
         self.vertices = Default::default();
     }
 
+    /// Returns the amount of memory used by the vertices and indices.
     pub fn bytes_used(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.vertices.len() * std::mem::size_of::<Vertex>()
@@ -107,9 +108,11 @@ impl Mesh {
     }
 
     /// Append all the indices and vertices of `other` to `self`.
+    ///
+    /// Panics when `other` mesh has a different texture.
     pub fn append(&mut self, other: Self) {
         crate::profile_function!();
-        crate::epaint_assert!(other.is_valid());
+        debug_assert!(other.is_valid());
 
         if self.is_empty() {
             *self = other;
@@ -120,8 +123,10 @@ impl Mesh {
 
     /// Append all the indices and vertices of `other` to `self` without
     /// taking ownership.
+    ///
+    /// Panics when `other` mesh has a different texture.
     pub fn append_ref(&mut self, other: &Self) {
-        crate::epaint_assert!(other.is_valid());
+        debug_assert!(other.is_valid());
 
         if self.is_empty() {
             self.texture_id = other.texture_id;
@@ -138,9 +143,12 @@ impl Mesh {
         self.vertices.extend(other.vertices.iter());
     }
 
+    /// Add a colored vertex.
+    ///
+    /// Panics when the mesh has assigned a texture.
     #[inline(always)]
     pub fn colored_vertex(&mut self, pos: Pos2, color: Color32) {
-        crate::epaint_assert!(self.texture_id == TextureId::default());
+        debug_assert!(self.texture_id == TextureId::default());
         self.vertices.push(Vertex {
             pos,
             uv: WHITE_UV,
@@ -203,7 +211,7 @@ impl Mesh {
     /// Uniformly colored rectangle.
     #[inline(always)]
     pub fn add_colored_rect(&mut self, rect: Rect, color: Color32) {
-        crate::epaint_assert!(self.texture_id == TextureId::default());
+        debug_assert!(self.texture_id == TextureId::default());
         self.add_rect_with_uv(rect, [WHITE_UV, WHITE_UV].into(), color);
     }
 
@@ -212,7 +220,7 @@ impl Mesh {
     /// Splits this mesh into many smaller meshes (if needed)
     /// where the smaller meshes have 16-bit indices.
     pub fn split_to_u16(self) -> Vec<Mesh16> {
-        crate::epaint_assert!(self.is_valid());
+        debug_assert!(self.is_valid());
 
         const MAX_SIZE: u32 = std::u16::MAX as u32;
 
@@ -265,7 +273,7 @@ impl Mesh {
                 vertices: self.vertices[(min_vindex as usize)..=(max_vindex as usize)].to_vec(),
                 texture_id: self.texture_id,
             };
-            crate::epaint_assert!(mesh.is_valid());
+            debug_assert!(mesh.is_valid());
             output.push(mesh);
         }
         output

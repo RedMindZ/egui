@@ -1,3 +1,6 @@
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 use std::{num::NonZeroU32, sync::Arc};
 
 use egui::{ViewportId, ViewportIdMap, ViewportIdSet};
@@ -80,6 +83,7 @@ pub struct Painter {
     configuration: WgpuConfiguration,
     msaa_samples: u32,
     support_transparent_backbuffer: bool,
+    dithering: bool,
     depth_format: Option<wgpu::TextureFormat>,
     screen_capture_state: Option<CaptureState>,
 
@@ -110,6 +114,7 @@ impl Painter {
         msaa_samples: u32,
         depth_format: Option<wgpu::TextureFormat>,
         support_transparent_backbuffer: bool,
+        dithering: bool,
     ) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: configuration.supported_backends,
@@ -120,6 +125,7 @@ impl Painter {
             configuration,
             msaa_samples,
             support_transparent_backbuffer,
+            dithering,
             depth_format,
             screen_capture_state: None,
 
@@ -206,7 +212,7 @@ impl Painter {
 
         if let Some(window) = window {
             let size = window.inner_size();
-            if self.surfaces.get(&viewport_id).is_none() {
+            if !self.surfaces.contains_key(&viewport_id) {
                 let surface = self.instance.create_surface(window)?;
                 self.add_surface(surface, viewport_id, size).await?;
             }
@@ -232,7 +238,7 @@ impl Painter {
 
         if let Some(window) = window {
             let size = window.inner_size();
-            if self.surfaces.get(&viewport_id).is_none() {
+            if !self.surfaces.contains_key(&viewport_id) {
                 let surface = unsafe {
                     self.instance
                         .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)?
@@ -261,6 +267,7 @@ impl Painter {
                 &surface,
                 self.depth_format,
                 self.msaa_samples,
+                self.dithering,
             )
             .await?;
             self.render_state.get_or_insert(render_state)

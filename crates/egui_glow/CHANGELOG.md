@@ -6,6 +6,27 @@ Changes since the last release can be found at <https://github.com/emilk/egui/co
 
 
 
+## 0.28.1 - 2024-07-05
+Nothing new
+
+
+## 0.28.0 - 2024-07-03
+* Enable `egui_glow`'s `winit` feature on Wasm (#4420) [#4421](https://github.com/emilk/egui/pull/4421) by [@simon-frankau](https://github.com/simon-frankau)
+
+
+## 0.27.2 - 2024-04-02
+* Nothing new
+
+
+## 0.27.1 - 2024-03-29
+* Nothing new
+
+
+## 0.27.0 - 2024-03-26
+* Only disable sRGB framebuffer on supported platforms [#3994](https://github.com/emilk/egui/pull/3994) (thanks [@Nopey](https://github.com/Nopey)!)
+* Update memoffset to 0.9.0, arboard to 3.3.1, and remove egui_glow's needless dependency on pure_glow's deps  [#4036](https://github.com/emilk/egui/pull/4036) (thanks [@Nopey](https://github.com/Nopey)!)
+
+
 ## 0.26.2 - 2024-02-14
 * Update memoffset to 0.9.0, arboard to 3.3.1, and remove egui_glow's needless dependency on pure_glow's deps  [#4036](https://github.com/emilk/egui/pull/4036) (thanks [@Nopey](https://github.com/Nopey)!)
 

@@ -6,7 +6,8 @@ use super::{button::DatePickerButtonState, month_data};
 
 use crate::{Column, Size, StripBuilder, TableBuilder};
 
-#[derive(Default, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Default, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 struct DatePickerPopupState {
     year: i32,
     month: u32,
@@ -33,6 +34,7 @@ pub(crate) struct DatePickerPopup<'a> {
     pub arrows: bool,
     pub calendar: bool,
     pub calendar_week: bool,
+    pub highlight_weekends: bool,
 }
 
 impl<'a> DatePickerPopup<'a> {
@@ -56,6 +58,9 @@ impl<'a> DatePickerPopup<'a> {
         let height = 20.0;
         let spacing = 2.0;
         ui.spacing_mut().item_spacing = Vec2::splat(spacing);
+
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend); // Don't wrap any text
+
         StripBuilder::new(ui)
             .clip(false)
             .sizes(
@@ -304,8 +309,9 @@ impl<'a> DatePickerPopup<'a> {
                                                             && popup_state.day == day.day()
                                                         {
                                                             ui.visuals().selection.bg_fill
-                                                        } else if day.weekday() == Weekday::Sat
-                                                            || day.weekday() == Weekday::Sun
+                                                        } else if (day.weekday() == Weekday::Sat
+                                                            || day.weekday() == Weekday::Sun)
+                                                            && self.highlight_weekends
                                                         {
                                                             if ui.visuals().dark_mode {
                                                                 Color32::DARK_RED

@@ -41,10 +41,12 @@ pub type EventLoopBuilderHook = Box<dyn FnOnce(&mut EventLoopBuilder<UserEvent>)
 #[cfg(any(feature = "glow", feature = "wgpu"))]
 pub type WindowBuilderHook = Box<dyn FnOnce(egui::ViewportBuilder) -> egui::ViewportBuilder>;
 
+type DynError = Box<dyn std::error::Error + Send + Sync>;
+
 /// This is how your app is created.
 ///
 /// You can use the [`CreationContext`] to setup egui, restore state, setup OpenGL things, etc.
-pub type AppCreator = Box<dyn FnOnce(&CreationContext<'_>) -> Box<dyn App>>;
+pub type AppCreator = Box<dyn FnOnce(&CreationContext<'_>) -> Result<Box<dyn App>, DynError>>;
 
 /// Data that is passed to [`AppCreator`] that can be used to setup and initialize your app.
 pub struct CreationContext<'s> {
@@ -66,6 +68,10 @@ pub struct CreationContext<'s> {
     /// Only available when compiling with the `glow` feature and using [`Renderer::Glow`].
     #[cfg(feature = "glow")]
     pub gl: Option<std::sync::Arc<glow::Context>>,
+
+    /// The `get_proc_address` wrapper of underlying GL context
+    #[cfg(feature = "glow")]
+    pub get_proc_address: Option<&'s dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
 
     /// The underlying WGPU render state.
     ///
@@ -146,6 +152,7 @@ pub trait App {
     /// On web the state is stored to "Local Storage".
     ///
     /// On native the path is picked using [`crate::storage_dir`].
+    /// The path can be customized via [`NativeOptions::persistence_path`].
     fn save(&mut self, _storage: &mut dyn Storage) {}
 
     /// Called once on shutdown, after [`Self::save`].
@@ -196,6 +203,24 @@ pub trait App {
     fn persist_egui_memory(&self) -> bool {
         true
     }
+
+    /// A hook for manipulating or filtering raw input before it is processed by [`Self::update`].
+    ///
+    /// This function provides a way to modify or filter input events before they are processed by egui.
+    ///
+    /// It can be used to prevent specific keyboard shortcuts or mouse events from being processed by egui.
+    ///
+    /// Additionally, it can be used to inject custom keyboard or mouse events into the input stream, which can be useful for implementing features like a virtual keyboard.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - The context of the egui, which provides access to the current state of the egui.
+    /// * `_raw_input` - The raw input events that are about to be processed. This can be modified to change the input that egui processes.
+    ///
+    /// # Note
+    ///
+    /// This function does not return a value. Any changes to the input should be made directly to `_raw_input`.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {}
 }
 
 /// Selects the level of hardware graphics acceleration.
@@ -210,7 +235,7 @@ pub enum HardwareAcceleration {
 
     /// Do NOT use graphics acceleration.
     ///
-    /// On some platforms (MacOS) this is ignored and treated the same as [`Self::Preferred`].
+    /// On some platforms (macOS) this is ignored and treated the same as [`Self::Preferred`].
     Off,
 }
 
@@ -340,6 +365,19 @@ pub struct NativeOptions {
     /// Controls whether or not the native window position and size will be
     /// persisted (only if the "persistence" feature is enabled).
     pub persist_window: bool,
+
+    /// The folder where `eframe` will store the app state. If not set, eframe will get the paths
+    /// from [directories].
+    pub persistence_path: Option<std::path::PathBuf>,
+
+    /// Controls whether to apply dithering to minimize banding artifacts.
+    ///
+    /// Dithering assumes an sRGB output and thus will apply noise to any input value that lies between
+    /// two 8bit values after applying the sRGB OETF function, i.e. if it's not a whole 8bit value in "gamma space".
+    /// This means that only inputs from texture interpolation and vertex colors should be affected in practice.
+    ///
+    /// Defaults to true.
+    pub dithering: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -356,6 +394,8 @@ impl Clone for NativeOptions {
 
             #[cfg(feature = "wgpu")]
             wgpu_options: self.wgpu_options.clone(),
+
+            persistence_path: self.persistence_path.clone(),
 
             ..*self
         }
@@ -396,6 +436,10 @@ impl Default for NativeOptions {
             wgpu_options: egui_wgpu::WgpuConfiguration::default(),
 
             persist_window: true,
+
+            persistence_path: None,
+
+            dithering: true,
         }
     }
 }
@@ -434,10 +478,14 @@ pub struct WebOptions {
     #[cfg(feature = "wgpu")]
     pub wgpu_options: egui_wgpu::WgpuConfiguration,
 
-    /// The size limit of the web app canvas.
+    /// Controls whether to apply dithering to minimize banding artifacts.
     ///
-    /// By default the max size is [`egui::Vec2::INFINITY`], i.e. unlimited.
-    pub max_size_points: egui::Vec2,
+    /// Dithering assumes an sRGB output and thus will apply noise to any input value that lies between
+    /// two 8bit values after applying the sRGB OETF function, i.e. if it's not a whole 8bit value in "gamma space".
+    /// This means that only inputs from texture interpolation and vertex colors should be affected in practice.
+    ///
+    /// Defaults to true.
+    pub dithering: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -454,7 +502,7 @@ impl Default for WebOptions {
             #[cfg(feature = "wgpu")]
             wgpu_options: egui_wgpu::WgpuConfiguration::default(),
 
-            max_size_points: egui::Vec2::INFINITY,
+            dithering: true,
         }
     }
 }
@@ -496,10 +544,10 @@ pub enum WebGlContextOption {
     /// Force use WebGL2.
     WebGl2,
 
-    /// Use WebGl2 first.
+    /// Use WebGL2 first.
     BestFirst,
 
-    /// Use WebGl1 first
+    /// Use WebGL1 first
     CompatibilityFirst,
 }
 
@@ -592,6 +640,11 @@ pub struct Frame {
     #[cfg(feature = "glow")]
     pub(crate) gl: Option<std::sync::Arc<glow::Context>>,
 
+    /// Used to convert user custom [`glow::Texture`] to [`egui::TextureId`]
+    #[cfg(all(feature = "glow", not(target_arch = "wasm32")))]
+    pub(crate) glow_register_native_texture:
+        Option<Box<dyn FnMut(glow::Texture) -> egui::TextureId>>,
+
     /// Can be used to manage GPU resources for custom rendering with WGPU using [`egui::PaintCallback`]s.
     #[cfg(feature = "wgpu")]
     pub(crate) wgpu_render_state: Option<egui_wgpu::RenderState>,
@@ -668,6 +721,15 @@ impl Frame {
         self.gl.as_ref()
     }
 
+    /// Register your own [`glow::Texture`],
+    /// and then you can use the returned [`egui::TextureId`] to render your texture with [`egui`].
+    ///
+    /// This function will take the ownership of your [`glow::Texture`], so please do not delete your [`glow::Texture`] after registering.
+    #[cfg(all(feature = "glow", not(target_arch = "wasm32")))]
+    pub fn register_native_glow_texture(&mut self, native: glow::Texture) -> egui::TextureId {
+        self.glow_register_native_texture.as_mut().unwrap()(native)
+    }
+
     /// The underlying WGPU render state.
     ///
     /// Only available when compiling with the `wgpu` feature and using [`Renderer::Wgpu`].
@@ -696,7 +758,7 @@ pub struct WebInfo {
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]
 pub struct Location {
-    /// The full URL (`location.href`) without the hash.
+    /// The full URL (`location.href`) without the hash, percent-decoded.
     ///
     /// Example: `"http://www.example.com:80/index.html?foo=bar"`.
     pub url: String,
@@ -736,8 +798,8 @@ pub struct Location {
 
     /// The parsed "query" part of "www.example.com/index.html?query#fragment".
     ///
-    /// "foo=42&bar%20" is parsed as `{"foo": "42",  "bar ": ""}`
-    pub query_map: std::collections::BTreeMap<String, String>,
+    /// "foo=hello&bar%20&foo=world" is parsed as `{"bar ": [""], "foo": ["hello", "world"]}`
+    pub query_map: std::collections::BTreeMap<String, Vec<String>>,
 
     /// `location.origin`
     ///

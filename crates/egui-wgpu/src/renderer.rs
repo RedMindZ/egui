@@ -2,14 +2,15 @@
 
 use std::{borrow::Cow, num::NonZeroU64, ops::Range};
 
-use epaint::{ahash::HashMap, emath::NumExt, PaintCallbackInfo, Primitive, Vertex};
+use ahash::HashMap;
+use epaint::{emath::NumExt, PaintCallbackInfo, Primitive, Vertex};
 
 use wgpu::util::DeviceExt as _;
 
 /// You can use this for storage when implementing [`CallbackTrait`].
 pub type CallbackResources = type_map::concurrent::TypeMap;
 
-/// You can use this to do custom `wgpu` rendering in an egui app.
+/// You can use this to do custom [`wgpu`] rendering in an egui app.
 ///
 /// Implement [`CallbackTrait`] and call [`Callback::new_paint_callback`].
 ///
@@ -49,7 +50,7 @@ impl Callback {
 ///
 /// ## Command Encoder
 ///
-/// The passed-in `CommandEncoder` is egui's and can be used directly to register
+/// The passed-in [`wgpu::CommandEncoder`] is egui's and can be used directly to register
 /// wgpu commands for simple use cases.
 /// This allows reusing the same [`wgpu::CommandEncoder`] for all callbacks and egui
 /// rendering itself.
@@ -57,7 +58,7 @@ impl Callback {
 /// ## Command Buffers
 ///
 /// For more complicated use cases, one can also return a list of arbitrary
-/// `CommandBuffer`s and have complete control over how they get created and fed.
+/// [`wgpu::CommandBuffer`]s and have complete control over how they get created and fed.
 /// In particular, this gives an opportunity to parallelize command registration and
 /// prevents a faulty callback from poisoning the main wgpu pipeline.
 ///
@@ -132,14 +133,16 @@ impl ScreenDescriptor {
 #[repr(C)]
 struct UniformBuffer {
     screen_size_in_points: [f32; 2],
+    dithering: u32,
     // Uniform buffers need to be at least 16 bytes in WebGL.
     // See https://github.com/gfx-rs/wgpu/issues/2072
-    _padding: [u32; 2],
+    _padding: u32,
 }
 
 impl PartialEq for UniformBuffer {
     fn eq(&self, other: &Self) -> bool {
         self.screen_size_in_points == other.screen_size_in_points
+            && self.dithering == other.dithering
     }
 }
 
@@ -162,11 +165,13 @@ pub struct Renderer {
     texture_bind_group_layout: wgpu::BindGroupLayout,
 
     /// Map of egui texture IDs to textures and their associated bindgroups (texture view +
-    /// sampler). The texture may be None if the TextureId is just a handle to a user-provided
+    /// sampler). The texture may be None if the `TextureId` is just a handle to a user-provided
     /// sampler.
     textures: HashMap<epaint::TextureId, (Option<wgpu::Texture>, wgpu::BindGroup)>,
     next_user_texture_id: u64,
     samplers: HashMap<epaint::textures::TextureOptions, wgpu::Sampler>,
+
+    dithering: bool,
 
     /// Storage for resources shared with all invocations of [`CallbackTrait`]'s methods.
     ///
@@ -184,6 +189,7 @@ impl Renderer {
         output_color_format: wgpu::TextureFormat,
         output_depth_format: Option<wgpu::TextureFormat>,
         msaa_samples: u32,
+        dithering: bool,
     ) -> Self {
         crate::profile_function!();
 
@@ -200,6 +206,7 @@ impl Renderer {
             label: Some("egui_uniform_buffer"),
             contents: bytemuck::cast_slice(&[UniformBuffer {
                 screen_size_in_points: [0.0, 0.0],
+                dithering: u32::from(dithering),
                 _padding: Default::default(),
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -211,7 +218,7 @@ impl Renderer {
                 label: Some("egui_uniform_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         has_dynamic_offset: false,
                         min_binding_size: NonZeroU64::new(std::mem::size_of::<UniformBuffer>() as _),
@@ -293,6 +300,7 @@ impl Renderer {
                         // 2: uint color
                         attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32],
                     }],
+                    compilation_options: wgpu::PipelineCompilationOptions::default()
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -334,8 +342,10 @@ impl Renderer {
                         }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default()
                 }),
                 multiview: None,
+                cache: None,
             }
         )
         };
@@ -361,13 +371,15 @@ impl Renderer {
             // Buffers on wgpu are zero initialized, so this is indeed its current state!
             previous_uniform_buffer_content: UniformBuffer {
                 screen_size_in_points: [0.0, 0.0],
-                _padding: [0, 0],
+                dithering: 0,
+                _padding: 0,
             },
             uniform_bind_group,
             texture_bind_group_layout,
             textures: HashMap::default(),
             next_user_texture_id: 0,
             samplers: HashMap::default(),
+            dithering,
             callback_resources: CallbackResources::default(),
         }
     }
@@ -495,7 +507,7 @@ impl Renderer {
         render_pass.set_scissor_rect(0, 0, size_in_pixels[0], size_in_pixels[1]);
     }
 
-    /// Should be called before `render()`.
+    /// Should be called before [`Self::render`].
     pub fn update_texture(
         &mut self,
         device: &wgpu::Device,
@@ -628,12 +640,11 @@ impl Renderer {
         self.textures.get(id)
     }
 
-    /// Registers a `wgpu::Texture` with a `epaint::TextureId`.
+    /// Registers a [`wgpu::Texture`] with a [`epaint::TextureId`].
     ///
     /// This enables the application to reference the texture inside an image ui element.
     /// This effectively enables off-screen rendering inside the egui UI. Texture must have
-    /// the texture format `TextureFormat::Rgba8UnormSrgb` and
-    /// Texture usage `TextureUsage::SAMPLED`.
+    /// the texture format [`wgpu::TextureFormat::Rgba8UnormSrgb`].
     pub fn register_native_texture(
         &mut self,
         device: &wgpu::Device,
@@ -652,9 +663,9 @@ impl Renderer {
         )
     }
 
-    /// Registers a `wgpu::Texture` with an existing `epaint::TextureId`.
+    /// Registers a [`wgpu::Texture`] with an existing [`epaint::TextureId`].
     ///
-    /// This enables applications to reuse `TextureId`s.
+    /// This enables applications to reuse [`epaint::TextureId`]s.
     pub fn update_egui_texture_from_wgpu_texture(
         &mut self,
         device: &wgpu::Device,
@@ -675,15 +686,14 @@ impl Renderer {
         );
     }
 
-    /// Registers a `wgpu::Texture` with a `epaint::TextureId` while also accepting custom
-    /// `wgpu::SamplerDescriptor` options.
+    /// Registers a [`wgpu::Texture`] with a [`epaint::TextureId`] while also accepting custom
+    /// [`wgpu::SamplerDescriptor`] options.
     ///
     /// This allows applications to specify individual minification/magnification filters as well as
     /// custom mipmap and tiling options.
     ///
-    /// The `Texture` must have the format `TextureFormat::Rgba8UnormSrgb` and usage
-    /// `TextureUsage::SAMPLED`. Any compare function supplied in the `SamplerDescriptor` will be
-    /// ignored.
+    /// The texture must have the format [`wgpu::TextureFormat::Rgba8UnormSrgb`].
+    /// Any compare function supplied in the [`wgpu::SamplerDescriptor`] will be ignored.
     #[allow(clippy::needless_pass_by_value)] // false positive
     pub fn register_native_texture_with_sampler_options(
         &mut self,
@@ -720,10 +730,10 @@ impl Renderer {
         id
     }
 
-    /// Registers a `wgpu::Texture` with an existing `epaint::TextureId` while also accepting custom
-    /// `wgpu::SamplerDescriptor` options.
+    /// Registers a [`wgpu::Texture`] with an existing [`epaint::TextureId`] while also accepting custom
+    /// [`wgpu::SamplerDescriptor`] options.
     ///
-    /// This allows applications to reuse `TextureId`s created with custom sampler options.
+    /// This allows applications to reuse [`epaint::TextureId`]s created with custom sampler options.
     #[allow(clippy::needless_pass_by_value)] // false positive
     pub fn update_egui_texture_from_wgpu_texture_with_sampler_options(
         &mut self,
@@ -763,7 +773,7 @@ impl Renderer {
     }
 
     /// Uploads the uniform, vertex and index data used by the renderer.
-    /// Should be called before `render()`.
+    /// Should be called before [`Self::render`].
     ///
     /// Returns all user-defined command buffers gathered from [`CallbackTrait::prepare`] & [`CallbackTrait::finish_prepare`] callbacks.
     pub fn update_buffers(
@@ -780,6 +790,7 @@ impl Renderer {
 
         let uniform_buffer_content = UniformBuffer {
             screen_size_in_points,
+            dithering: u32::from(self.dithering),
             _padding: Default::default(),
         };
         if uniform_buffer_content != self.previous_uniform_buffer_content {

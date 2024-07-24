@@ -72,7 +72,7 @@ impl CollapsingState {
         if ctx.memory(|mem| mem.everything_is_visible()) {
             1.0
         } else {
-            ctx.animate_bool(self.id, self.state.open)
+            ctx.animate_bool_responsive(self.id, self.state.open)
         }
     }
 
@@ -230,7 +230,7 @@ impl CollapsingState {
         }
     }
 
-    /// Paint this [CollapsingState](CollapsingState)'s toggle button. Takes an [IconPainter](IconPainter) as the icon.
+    /// Paint this [`CollapsingState`]'s toggle button. Takes an [`IconPainter`] as the icon.
     /// ```
     /// # egui::__run_test_ui(|ui| {
     /// fn circle_icon(ui: &mut egui::Ui, openness: f32, response: &egui::Response) {
@@ -272,6 +272,18 @@ pub struct HeaderResponse<'ui, HeaderRet> {
 }
 
 impl<'ui, HeaderRet> HeaderResponse<'ui, HeaderRet> {
+    pub fn is_open(&self) -> bool {
+        self.state.is_open()
+    }
+
+    pub fn set_open(&mut self, open: bool) {
+        self.state.set_open(open);
+    }
+
+    pub fn toggle(&mut self) {
+        self.state.toggle(self.ui);
+    }
+
     /// Returns the response of the collapsing button, the custom header, and the custom body.
     pub fn body<BodyRet>(
         mut self,
@@ -417,7 +429,7 @@ impl CollapsingHeader {
 
     /// If you set this to `false`, the [`CollapsingHeader`] will be grayed out and un-clickable.
     ///
-    /// This is a convenience for [`Ui::set_enabled`].
+    /// This is a convenience for [`Ui::disable`].
     #[inline]
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
@@ -494,8 +506,12 @@ impl CollapsingHeader {
         let available = ui.available_rect_before_wrap();
         let text_pos = available.min + vec2(ui.spacing().indent, 0.0);
         let wrap_width = available.right() - text_pos.x;
-        let wrap = Some(false);
-        let galley = text.into_galley(ui, wrap, wrap_width, TextStyle::Button);
+        let galley = text.into_galley(
+            ui,
+            Some(TextWrapMode::Extend),
+            wrap_width,
+            TextStyle::Button,
+        );
         let text_max_x = text_pos.x + galley.size().x;
 
         let mut desired_width = text_max_x + button_padding.x - available.left();
@@ -524,8 +540,9 @@ impl CollapsingHeader {
             header_response.mark_changed();
         }
 
-        header_response
-            .widget_info(|| WidgetInfo::labeled(WidgetType::CollapsingHeader, galley.text()));
+        header_response.widget_info(|| {
+            WidgetInfo::labeled(WidgetType::CollapsingHeader, ui.is_enabled(), galley.text())
+        });
 
         let openness = state.openness(ui.ctx());
 
@@ -600,7 +617,9 @@ impl CollapsingHeader {
         // Make sure body is bellow header,
         // and make sure it is one unit (necessary for putting a [`CollapsingHeader`] in a grid).
         ui.vertical(|ui| {
-            ui.set_enabled(self.enabled);
+            if !self.enabled {
+                ui.disable();
+            }
 
             let Prepared {
                 header_response,

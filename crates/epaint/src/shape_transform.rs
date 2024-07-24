@@ -1,38 +1,31 @@
+use std::sync::Arc;
+
 use crate::*;
 
 /// Remember to handle [`Color32::PLACEHOLDER`] specially!
-pub fn adjust_colors(shape: &mut Shape, adjust_color: &impl Fn(&mut Color32)) {
+pub fn adjust_colors(
+    shape: &mut Shape,
+    adjust_color: impl Fn(&mut Color32) + Send + Sync + Copy + 'static,
+) {
     #![allow(clippy::match_same_arms)]
     match shape {
         Shape::Noop => {}
+
         Shape::Vec(shapes) => {
             for shape in shapes {
                 adjust_colors(shape, adjust_color);
             }
         }
+
         Shape::LineSegment { stroke, points: _ } => {
-            adjust_color(&mut stroke.color);
+            adjust_color_mode(&mut stroke.color, adjust_color);
         }
 
-        Shape::Circle(CircleShape {
-            center: _,
-            radius: _,
-            fill,
-            stroke,
-        })
-        | Shape::Path(PathShape {
+        Shape::Path(PathShape {
             points: _,
             closed: _,
             fill,
             stroke,
-        })
-        | Shape::Rect(RectShape {
-            rect: _,
-            rounding: _,
-            fill,
-            stroke,
-            fill_texture_id: _,
-            uv: _,
         })
         | Shape::QuadraticBezier(QuadraticBezierShape {
             points: _,
@@ -45,6 +38,31 @@ pub fn adjust_colors(shape: &mut Shape, adjust_color: &impl Fn(&mut Color32)) {
             closed: _,
             fill,
             stroke,
+        }) => {
+            adjust_color(fill);
+            adjust_color_mode(&mut stroke.color, adjust_color);
+        }
+
+        Shape::Circle(CircleShape {
+            center: _,
+            radius: _,
+            fill,
+            stroke,
+        })
+        | Shape::Ellipse(EllipseShape {
+            center: _,
+            radius: _,
+            fill,
+            stroke,
+        })
+        | Shape::Rect(RectShape {
+            rect: _,
+            rounding: _,
+            fill,
+            stroke,
+            blur_width: _,
+            fill_texture_id: _,
+            uv: _,
         }) => {
             adjust_color(fill);
             adjust_color(&mut stroke.color);
@@ -87,6 +105,23 @@ pub fn adjust_colors(shape: &mut Shape, adjust_color: &impl Fn(&mut Color32)) {
 
         Shape::Callback(_) => {
             // Can't tint user callback code
+        }
+    }
+}
+
+fn adjust_color_mode(
+    color_mode: &mut ColorMode,
+    adjust_color: impl Fn(&mut Color32) + Send + Sync + Copy + 'static,
+) {
+    match color_mode {
+        color::ColorMode::Solid(color) => adjust_color(color),
+        color::ColorMode::UV(callback) => {
+            let callback = callback.clone();
+            *color_mode = color::ColorMode::UV(Arc::new(Box::new(move |rect, pos| {
+                let mut color = callback(rect, pos);
+                adjust_color(&mut color);
+                color
+            })));
         }
     }
 }
